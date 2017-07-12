@@ -84,6 +84,7 @@ typedef struct _typeobject {
 > 函数指针直接决定这一个对象在运行时所表现出的行为
 
 <p>比如</p>
+
 > 数值特性(PyNumberMethods *tp_as_number)
 
 > 序列特性(PySequenceMethods *tp_as_sequence)
@@ -102,6 +103,7 @@ typedef struct{
 ```
 
 <p>特性的混合</p>
+
 ```python
 class MyInt(int):
     def __getitem__(self,key):
@@ -116,3 +118,55 @@ class MyInt(int):
 
 #### f.类型的类型
 > PyType_Type => <type 'type'> 它是所有class的class，被称为metaclass
+
+```c
+[typeobject.c]
+PyTypeObject PyType_Type = {
+  PyObject_HEAD_INIT(&PyType_Type)
+  0, /* ob_size */
+  "type" /* tp_name */
+  sizeof(PyHeapTypeObject), /* tp_basicsize */
+  sizeof(PyMemberDef),  /* tp_itemsize */
+  ...
+};
+```
+
+<p>PyTypeObject和PyType_Type的关系</p>
+
+```python
+>> class A(object):
+    pass
+>>A.__class__
+<type 'type'>
+>>int.__class__
+<type 'type'>
+>>type.__class__
+<type 'type'>
+```
+<p>举例</p>
+
+<p>PyInt_Type和PyType_Type之间的关系</p>
+
+```c
+[intobject.c]
+PyTypeObject PyInt_type = {
+  PyObject_HEAD_INIT(&PyType_Type)
+  0,
+  "int",
+  sizeof(PyIntObject),
+  ...
+}
+```
+<p>运行时整数对象及其类型之间的关系</p>
+
+![pyint_pytype](/image/pyint_pytype.png)
+
+#### g.Python对象的多态性
+
+<p>通过ob_type域动态进行判断，Python实现了多态机制</p>
+
+```c
+void Print(PyObject *object){
+  object->ob_type->tp_print(object);
+}
+```
