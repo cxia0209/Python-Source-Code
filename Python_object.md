@@ -81,3 +81,38 @@ typedef struct _typeobject {
 ![pyint_type调用](/image/pyint_type.png)
 
 #### e.对象的行为
+> 函数指针直接决定这一个对象在运行时所表现出的行为
+
+<p>比如</p>
+> 数值特性(PyNumberMethods *tp_as_number)
+
+> 序列特性(PySequenceMethods *tp_as_sequence)
+
+> 关联特性(PyMappingMethods *tp_as_mapping)
+
+```c
+[object.h]
+typedef PyObject *(*binaryfunc)(PyObject *, PyObject *);
+
+typedef struct{
+  binaryfunc nb_add;
+  binaryfunc nb_subtract;
+  ......
+} PyNumberMethods;
+```
+
+<p>特性的混合</p>
+```python
+class MyInt(int):
+    def __getitem__(self,key):
+        return key + str(self)
+>> a = Myint(1)
+>> b = Myint(2)
+>> print a + b
+3
+>> a['key']
+'key1'
+```
+
+#### f.类型的类型
+> PyType_Type => <type 'type'> 它是所有class的class，被称为metaclass
