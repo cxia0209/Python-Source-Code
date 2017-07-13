@@ -104,7 +104,7 @@ PyObject* PyString_FromStringAndSize(const char* str, int size){
   }
 
   //处理字符
-  if(size == 1 && str != NULL && (op = characters[*str & UNCHAR_MAX]) != NULL){
+  if(size == 1 && str != NULL && (op = characters[*str & UCHAR_MAX]) != NULL){
     return (PyObject *)op;
   }
 
@@ -119,5 +119,93 @@ PyObject* PyString_FromStringAndSize(const char* str, int size){
   op->ob_size[size] = '\0';
   ....
   return (PyObject*)op;
+}
+```
+
+#### c.字符串对象的intern机制
+
+<p>当字符串长度为0或1时，需要进行PyString_InternInPlace，这就是intern机制</p>
+
+```c
+[stringobject.c]
+PyObject* PyString_FromString(const char* str){
+  register size_t size;
+  register PyStringObject *op;
+
+  .... //创建PyStringObject对象
+
+  //intern(共享)长度较短的PyStringObject对象
+  if(size == 0){
+    PyObject* t = (PyObject *)op;
+    PyString_InternInPlace(&t);
+    op = (PyStringObject *)t;
+    nullstring = op;
+  }else if(size == 1){
+    PyObject* t = (PyObject *)op;
+    PyString_InternInPlace(&t);
+    op = (PyStringObject *)t;
+    characters[*str & UCHAR_MAX] = op;
+  }
+
+  return (PyObject *)op;
+}
+```
+
+<p>被intern之后的字符串，在整个Python的运行期间，系统中都只有唯一一个与字符串对应的PyStringObject对象</p>
+
+```c
+/* intern */
+[stringobject.c]
+void PyString_InternInPlace(PyObject **p){
+  register PyStringObject *s = (PyStringObject *)(*p);
+  PyObject *t;
+  //对PyStringObject进行类型和状态检查
+  if(!PyString_CheckExact(s))
+    return;
+  if(PyString_CHECK_INTERNED(s))
+    return;
+  //创建记录经intern机制处理后的PyStringObject的dict
+  if(interned = NULL){  // 在stringobject.c中被定义为static PyObject* interned
+    interned = PyDict_New();
+  }
+  //检查PyStringObject对象s是否存在对应的intern后的PyStringObject对象
+  t = PyDict_GetItem(interned,(PyObject *)s);
+  if(t){
+    //注意这里对引用计数的调整
+    Py_INCREF(t);
+    Py_DECREF(*p);
+    *p = t;
+    return;
+  }
+
+  //在interned中记录检查PyStringObject对象s
+  PyDict_SetItem(interned,(PyObject *)s, (PyObject *)s);
+  //注意这里对引用计数的调整
+  s->ob_refcnt -= 2;  //在将PyObject指针作为key和value添加到interned中时，PyDictObject会通过两个指针对引用计数进行两次加1
+  // 调整s中的itern状态标志
+  PyString_CHECK_INTERNED(s) = SSTATE_INTERNED_MORTAL;
+}
+```
+
+![intern_bef_aft](/image/intern_bef_aft.png)
+
+```c
+[stringobject.c]
+static void string_dealloc(PyObject* op){
+  switch (PyString_CHECK_INTERNED(op)) {
+    case SSTATE_NOT_INTERNED:
+        break;
+    case SSTATE_INTERNED_MORTAL:
+        /* revive dead object temporarily for DelItem */
+        op->ob_refcnt = 3;
+        if(PyDict_DelItem(interned,op) != 0)
+          Py_FatalError("deletion of interned string failed");
+        break;
+    case SSTATE_INTERNED_IMMORTAL:
+        Py_FatalError("Immortal interned string died.");
+    default:
+        Py_FatalError("Inconsistent interned string state.");
+  }
+  op->ob_type->tp_free(op);
 }
 ```
