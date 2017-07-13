@@ -1,4 +1,4 @@
-### 1. Python 中的整数对象
+### 1. Python 中的整数对象(定长对象)
 
 #### a.PyIntObject
 
