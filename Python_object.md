@@ -170,3 +170,34 @@ void Print(PyObject *object){
   object->ob_type->tp_print(object);
 }
 ```
+
+#### h.引用计数
+
+> ob_refcnt 变量，32位整型，决定着对象的创建与消亡
+
+> 通过Py_INCREF(op) 和 PyDECREF(op) 两个宏来增加和减少一个对象的引用计数
+
+> 通过_Py_NewReference(op)宏来将对象的引用计数初始化为1
+
+> PyDECREF 的“析构动作” 是通过一个函数指针tp_dealloc来进行的(Observer设计模式)
+
+> 在Python的各种对象中， 类型对象永远不会被析构
+
+```c
+[object.h]
+#define _Py_NewReference(op) ((op)->ob_refcnt = 1)
+#define _Py_Dealloc(op) ((*(op)->ob_type->tp_dealloc)((PyObject *)(op)))
+#define Py_INCREF ((op)->ob_refcnt++)
+#define Py_DECREF(op)
+        if(--(op)->ob_refcnt != 0);
+        else
+            _Py_Dealloc((PyObject *)(op))
+
+/* Macros to use in case the object pointer may be NULL */
+#define Py_XINCREF(op) if ((op) == NULL); else Py_INCREF(op)
+#define Py_XDECREF(op) if ((op) == NULL); else Py_DECREF(op)
+```
+
+#### i.Python对象的分类
+
+![python_object](/image/python_object.png)
