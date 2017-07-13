@@ -1,6 +1,6 @@
 ### 1. Python 中的整数对象
 
-#### PyIntObject
+#### a.PyIntObject
 
 > 二分类对象
 
@@ -150,3 +150,141 @@ static PyObject* int_add(PyIntObject *v, PyIntObject *w){
 [intobject.c]
 PyDoc_STRVAR(int_doc,"int(x[,base])->integer........")
 ```
+
+#### b.PyIntObject对象的创建和维护
+
+> 对象创建的3种途径
+
+```c
+PyObject *PyInt_FromLong(long ival)
+/*PyInt_FromString和PyInt_FromUnicode都是先将字符串或Py_UNICODE转换乘浮点数，再调用PyInt_FromFloat(采用了Adaptor Pattern设计模式)*/
+PyObject *PyInt_FromString(char *s,char **pend,int base)
+#ifdef Py_USING_UNICODE
+    PyObject *PyInt_FromUnicode(Py_UNICODE *s, int length, int base)
+#endif
+```
+
+```c
+[intobject.c]
+PyObjec* PyInt_FromString(char*s, char** pend, int base){
+  char* end;
+  long x;
+  .......
+  //将字符串转换为long值
+  if( base == 0 && s[0] == '0'){
+    x = (long) PyOS_strtoul(S,&end,base);
+  }else{
+    x = PyOS_strtol(s,&end,base);
+  }
+  .......
+  return PyInt_FromLong(x);
+}
+```
+
+> 小整数对象
+
+```c
+[intobject.c]
+#ifndef NSMALLPOSINTS
+    #define NSMALLPOSINTS 257
+#endif
+#ifndef NSMALLNEGINTS
+    #define NSMALLNEGINTS 5
+#endif
+#if NSMALLNEGINTS + NSMALLPOSINTS > 0
+    static PyIntObject* small_ints[NSMALLNEGINTS + NSMALLPOSINTS];
+#endif
+```
+
+> 大整数对象
+
+<p>PyIntBlock结构+单项列表</p>
+
+```c
+[intobject.c]
+#define BLOCK_SIZE 1000 /* 1K less typical malloc overhead */
+#define BHEAD_SIZE 8 /* Enough for a 64-bit pointer */
+#define N_INTOBJECTS ((BLOCK_SIZE - BHEAD_SIZE)/sizeof(PyIntObject))
+
+struct _intblock{
+  struct _intblock *next;
+  PyIntObject objects[N_INTOBJECTS];
+};
+typedef struct _intblock PyIntBlock;
+
+static PyIntBlock* block_list = NULL;
+static PyIntObject* free_list = NULL;
+```
+
+> 添加和删除
+
+<p>以PyInt_FromLong为例子</p>
+
+```c
+[intobject.c]
+PyObject* PyInt_FromLong(long ival){
+  register PyIntObject* v;
+  #if NSMALLNEGINTS + NSMALLPOSINTS > 0
+  //尝试使用小整数对象池
+  if(-NSMALLNEGINTS <= ival && ival < NSMALLPOSINTS){
+    v = small_ints[ival + NSMALLNEGINTS];
+    Py_INCREF(v);
+    return (PyObject*) v;
+  }
+  #endif
+
+  //为通用整数对象池申请新的内存空间
+  if(free_list == NULL){
+    if((free_list == fill_free_list()) == NULL)
+        return NULL;
+  }
+
+  //(inline)内联PyObject_New的行为
+  v = free_list;
+  free_list = (PyIntObject*)v->ob_type;
+  PyObject_INIT(v,&PyInt_Type);
+  v->ob_ival = ival'
+  return (PyObject* v);
+}
+```
+
+```c
+/* fill_free_list */
+/* 当block满了以后free_list会再次为空，所以会再次调用fill_free_list */
+/* block_list始终是指向罪最新的PyIntBlock对象 */
+[intobject.c]
+static PyIntObject* fill_free_list(void){
+  PyIntObject *p, *q;
+  // 申请大小为sizeof(PyIntBlock)的内存空间，并链接到已有的block list中
+  p = (PyIntObject *)PyMem_MALLOC(sizeof(PyIntBlock));
+  ((PyIntBlock *)p)->next = block_list;
+  block_list = (PyIntBlock *)p;
+  // 将PyIntBlock中的PyIntObject数组--objects--转变成单项链表
+  p = &((PyIntBlock *)p)->objects[0];
+  q = p + N_INTOBJECTS;
+  while(--q > p)
+    q->ob_type = (struct _typeobject*)(q-1);
+  q->ob_type = NULL;
+  return p + N_INTOBJECTS - 1;
+}
+```
+![PyIntBlock](/image/py_intblock.png)
+
+> 不同的PyIntBlock中的objects中的空闲块是在一个PyIntObject对象被销毁的时候被链接在一起的
+
+```c
+/* PyIntObject对象的tp_dealloc操作 */
+[intobject.c]
+static void int_dealloc(PyIntObject* v){
+  if(PyInt_CheckExact(v)){
+    v->ob_type = (struct _typeobject *)free_list;
+    free_list = v
+  }else{
+    v->ob_type->tp_free((PyIntObject*)v);
+  }
+}
+```
+
+![add_delete_example](/image/add_delete_example.png)
+
+> 小整数对象池的初始化
