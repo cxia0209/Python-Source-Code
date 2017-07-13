@@ -288,3 +288,67 @@ static void int_dealloc(PyIntObject* v){
 ![add_delete_example](/image/add_delete_example.png)
 
 > 小整数对象池的初始化
+
+```c
+[intobject.c]
+int _PyInt_Init(void){
+  PyIntObject *v;
+  int ival;
+  #if NSMALLNEGINTS + NSMALLPOSINTS > 0
+  for( ival = -NSMALLNEGINTS; ival < NSMALLPOSINTS; ival ++){
+    if(!free_list && (free_list = fill_free_list()) == NULL)
+      return 0;
+    //内联(inline)PyObject_New的行为
+    v = free_list;
+    free_list = (PyIntObject *)v->ob_type;
+    PyObject_INIT(v,&PyInt_Type);
+    v->ob_ival = ival;
+    small_ints[ival + NSMALLNEGINTS] = v;
+  }
+  #endif
+  return 1;
+}
+```
+
+#### Hack PyIntObject
+```c
+static int values[10];
+static int refcounts[10];
+static int int_print(PyIntObject *v, FILE *fp, int flags){
+  PyIntObject* intObjectPtr;
+  PyIntBlock* p = block_list;
+  PyIntBlock* last = NULL;
+  int count = 0;
+  int i;
+  while(p != NULL){
+    ++count;
+    last = p;
+    p = p->next;
+  }
+  intObjectPtr = last->objects;
+  intObjectPtr += N_INTOBJECTS - 1;
+  printf(" address @%p\n",v );
+
+  for( i = 0; i < 10; ++i, --intObjectPtr){
+    values[i] = intObjectPtr->ob_ival;
+    refcounts[i] = intObjectPtr->ob_refcnt;
+  }
+
+  printf(" value : ");
+  for(i = 0; i < 8; ++i){
+    printf("%d\t", values[i] );
+  }
+  printf("\n");
+
+  printf(" refcnt :");
+  for( i = 0; i < 8; ++i){
+    printf("%d\t", refcounts[i]);
+  }
+  printf("\n");
+
+  printf(" block_list count : %d\n", count);
+  printf(" free_list : %p\n", free_list );
+
+  return 0;
+}
+```
