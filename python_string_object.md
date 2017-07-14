@@ -103,7 +103,7 @@ PyObject* PyString_FromStringAndSize(const char* str, int size){
     return (PyObject*)op;
   }
 
-  //处理字符
+  //处理字符,检查字符缓冲区是否已经有了该字符对象，如果有则直接返回
   if(size == 1 && str != NULL && (op = characters[*str & UCHAR_MAX]) != NULL){
     return (PyObject *)op;
   }
@@ -208,4 +208,86 @@ static void string_dealloc(PyObject* op){
   }
   op->ob_type->tp_free(op);
 }
+```
+
+```c
+/* 创建SSTATE_INTERNED_IMMORTAL对象 */
+[stringobject.c]
+void PyString_InternImmortal(PyObject **p){
+  PyString_InternInPlace(p)
+  if(PyString_CHECK_INTERNED(*p) != SSTATE_INTERNED_IMMORTAL){
+    PyString_CHECK_INTERNED(*p) = SSTATE_INTERNED_IMMORTAL;
+    Py_INCREF(*p);
+  }
+}
+```
+
+#### d.字符缓冲池
+
+> 为PyStringObject中的一个字节的字符对应的PyStringObject对象设计了一个对象池characters
+
+```c
+static PyStringObject* characters[UCHAR_MAX + 1]; // UCHAR_MAX是一个平台相关的常量
+#define UCHAR_MAX 0xff //win32平台
+```
+
+```c
+/* 如果字符串只有一个字符 */
+[stringobject.c]
+PyObject* PyString_FromStringAndSize(const char* str, int size){
+  ...
+  else if(size == 1 && str != NULL){
+    PyObject* t = (PyObject *)op;
+    PyString_InternInPlace(&t);
+    op = (PyStringObject *)t;
+    characters[*str & UCHAR_MAX] = op;
+    Py_INCREF(op);
+  }
+  return (PyObject *)op;
+}
+```
+
+![1_char_intern](/image/1_char_intern.png)
+
+#### PyStringObject效率相关问题
+
+> 字符串连接
+
+<p>Python中"+"进行字符串连接效率非常低下，因为PyStringObject对象是一个不可变对象，每次连接需要创建新的PyStringObject对象</p>
+
+*通过利用PyStringObject的join操作来对操作，只分配一次内存，效率大大提高*
+
+```c
+/* 通过“+”操作符对字符串进行连接 */
+
+static PyObject* string_concat(register PyStringObject* a, register PyObject* bb){
+  register unsigned int size;
+  register PyStringObject* op;
+  #define b ((PyStringObject *)bb)
+  ...
+  //计算字符串连接后的长度
+  size  = a->ob_size + b->ob_size;
+
+  /* Inline PyObject_NewVar */
+  //创建新的PyStringObject对象，其维护的用于存储字符的内存长度为size
+
+  op = (PyStringObject *)PyObject_MALLOC(sizeof(PyStringObject) + size);
+  PyObject_INIT_VAR(op, &PyString_Type, size);
+  op->ob_shash = -1;
+  op->ob_sstate = SSTATE_NOT_INTERNED;
+
+  //将a和b中的字符拷贝到新创建的PyStringObject中
+  memcpy(op->ob_sval,a->ob_sval,(int)a->ob_size);
+  memcpy(ob->ob_sval + a->ob_size, b->ob_sval, (int)b->ob_size);
+  op->ob_sval[size] = '\0';
+  return (PyObject *)op;
+
+  #undef b
+}
+
+```
+
+```c
+/* 通过“join”操作符对字符串进行连接 */
+
 ```
