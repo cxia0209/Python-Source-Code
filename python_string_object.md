@@ -249,7 +249,7 @@ PyObject* PyString_FromStringAndSize(const char* str, int size){
 
 ![1_char_intern](/image/1_char_intern.png)
 
-#### PyStringObject效率相关问题
+#### e.PyStringObject效率相关问题
 
 > 字符串连接
 
@@ -289,5 +289,47 @@ static PyObject* string_concat(register PyStringObject* a, register PyObject* bb
 
 ```c
 /* 通过“join”操作符对字符串进行连接 */
+[stringobject.c]
+static PyObject* string_join(PyStringObject* self, PyObject *orig){
+  char* sep = PyString_AS_STRING(self);
+  //假设调用"abc".join(list),那么self就是"abc"对应的PyStringObject对象
+  //所以seplen中存储这"abc"的长度
+  const int seplen = PyString_GET_SIZE(self);
+  PyObject* res = NULL;
+  char *p;
+  int seqlen = 0;
+  size_t sz = 0;
+  int i;
+  PyObject* seq, *item;
+  ...//获得list中PyStringObject对象的个数，保存的seqlen中
 
+  //遍历list中每一个字符串，累加获得连接list中所有字符串后的长度
+  for(i = 0; i < seqlen; i++){
+    //seq为Python中的list对象，这里获得其中第i个字符串
+    item = PySequence_Fast_GET_ITEM(seq,i);
+    sz += PyString_GET_SIZE(item);
+    if(i != 0)
+        sz += seplen;
+  }
+
+  //创建长度为sz的PyStringObject对象
+  res = PyString_FromStringAndSize((char* )NULL,(int)sz);
+  //将list中的字符串拷贝到新创建的PyStringObject对象中
+  p = PyString_AS_STRING(res);
+  for( i = 0; i < seqlen; ++i){
+    size_t n;
+    item = PySequence_Fast_GET_ITEM(seq,i);
+    n = PyString_GET_SIZE(item);
+    memcpy(p,PyString_AS_STRING(item),n);
+    p += n;
+
+    if( i < seqlen - 1){
+      memcpy(p,sep,seplen);
+      p += seplen;
+    }
+  }
+  return res;
+}
 ```
+
+#### f.Hack PyStringObject
