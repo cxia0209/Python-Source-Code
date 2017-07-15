@@ -174,3 +174,56 @@ static int app1(PyListObject* self,PyObject* v){
   return 0;
 }
 ```
+
+> 删除元素
+
+```c
+[listobject.c]
+static PyObject* listremove(PyListObject* self, PyObject* v){
+  int i;
+  for(i = 0; i < self.ob_size; i++){
+    //比较list中的元素与删除元素
+    int cmp = PyOBject_RichCompareBool(self->ob_item[i],v,Py_EQ);
+    if(cmp > 0){
+      if(list_ass_slice(self,i,i+1,(PyObject* )NULL) == 0)
+          Py_RETURN_NONE;
+      return NULL;
+    }
+    else if(cmp < 0)
+        return NULL;
+  }
+  PyErr_SetString(PyExc_ValueError, "list.remove(x) : x not in list");
+  return NULL;
+}
+```
+
+```c
+int list_ass_slice(PyListObject* a, Py_ssize_t ilow, Py_ssize_t ihigh, PyObject* v)
+/* 两种语义 */
+1.a[ilow:ihigh] = v if v != NULL
+2.del a[ilow:ihigh] if v == NULL
+```
+
+#### PyListObject对象缓冲池
+
+```c
+[listobject.c]
+static void list_dealloc(PyListObject* op){
+  int i;
+
+  //销毁PyListObject对象维护的元素列表
+  if(op->ob_item != NULL){
+    i = op->ob_size;
+    while(--i >= 0){
+      Py_XDECREF(op->ob_item[i]);
+    }
+    PyMem_FREE(op->ob_item);
+  }
+
+  //释放PyListObject自身
+  if(num_free_lists < MAXFREELISTS && PyList_CheckExact(op))
+      free_lists[num_free_lists++] = op;
+  else
+      op->ob_type->tp_free((PyObject *)op);
+}
+```
