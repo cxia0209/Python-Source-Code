@@ -230,6 +230,8 @@ static dictentry* lookdict_string(dictobject* mp, PyObject* key, register long h
 
 > 插入与删除
 
+<p>插入</p>
+
 ```c
 [dictobject.c]
 static void insertdict(register dictobject* mp, PyObject* key, long hash , PyObject* value){
@@ -260,5 +262,112 @@ static void insertdict(register dictobject* mp, PyObject* key, long hash , PyObj
 ```
 
 ```c
-/* 再调用insertdict之前调用PyDict_SetItem设置hash值 */
+/* 在调用insertdict之前先设置hash值 */
+[dictobject.c]
+int PyDict_SetItem(register PyObject* op, PyObject* key, PyObject* value){
+  register dictobject* mp;
+  register long hash;
+  register Py_ssize_t n_used;
+
+  mp = (dictobject *)op;
+  //计算hash值
+  if(PyString_CheckExact(key)){
+    hash = ((PyStringObject *)key)->ob_shash;
+    if(hash == -1)
+      hash = PyObject_Hash(key);
+  }
+  else{
+    hash = PyObject_Hash(key);
+    if(hash == -1)
+      return -1;
+  }
+
+  //插入(key,value)元素对
+  n_used = mp->ma_used;
+  insertdict(mp,key,hash,value);
+
+  //必要时调整dict的内存空间
+  if(!(mp->ma_used > n_used && mp->ma_fill*3 >= (mp->ma_mask + 1)*2)) //如果装载率大于等于2/3,改变table大小
+    return 0;
+  return dictresize(mp,mp->ma_used*(mp->ma_used > 50000 ? 2 : 4));
+}
+```
+
+```c
+/* 如何改变table大小 */
+static int dictresize(dictobject* mp, int minused){
+  Py_ssize_t newsize;
+  dictentry* oldtable, *newtable, *ep;
+  Py_ssize_t i;
+  int is_oldtable_malloced;
+  dictentry small_copy[PyDict_MINSIZE];
+
+  //确定新的table的大小
+  for(newsize = PyDict_MINSIZE; newsize <= minused && newsize > 0; newsize <<=1);
+
+  oldtable = mp->ma_table;
+  is_oldtable_malloced = (oldtable != mp->ma_smalltable);
+
+  //新的table可以使用mp->ma_smalltable
+  if(newsize == PyDict_MINSIZE){
+    newtable = mp->ma_smalltable;
+    if(newtable == oldtable){
+      if(mp->ma_fill == mp->ma_used){
+        //没有任何dummy态entry，直接返回
+        return 0;
+      }
+      //将旧table拷贝，进行备份
+      memcpy(small_copy,oldtable,sizeof(small_copy));
+      oldtable = small_copy;
+    }
+  }
+
+  //新的table不能使用ma->ma_smalltable，需要在系统堆上申请
+  else{
+    newtable = PyMem_NEW(dictentry,newsize);
+  }
+
+  //设置新的table
+  mp->ma_table = newtable;
+  mp->ma_mask = newsize - 1;
+  memset(newtable,0,sizeof(dictentry)*newsize);
+  mp->ma_used = 0;
+  i = mp->ma_fill;
+  mp->ma_fill = 0;
+
+  //处理旧table中的entry
+  //Active态entry，搬移到新table中
+  //Dummy态entry，调整key的引用计数，丢弃该entry
+  for(ep = oldtable; i> 0; ep++){
+    if(ep->me_value != NULL){ /* active entry */
+      --i;
+      insertdict(mp,ep->me_key,ep->me_hash,ep->me_value);
+    }
+    else if(ep->me_key != NULL){/* dummy entry */
+      --i;
+      assert(ep->me_key == dummy);
+      Py_DECREF(ep->me_key);
+    }
+  }
+
+  //必要时释放旧table所维护的内存空间
+  if(is_oldtable_malloced)
+    PyMem_DEL(oldtable);
+  return 0;
+}
+```
+
+<p>删除</p>
+
+```c
+[dictobject.c]
+int PyDict_DelItem(PyObject* op, PyObject* key){
+  register dictobject* mp;
+  register long hash;
+  register dictentry* ep;
+  PyObject* old_value, *old_key;
+
+  //获得hash值
+  if(!PyString_CheckExact(key))
+}
 ```
