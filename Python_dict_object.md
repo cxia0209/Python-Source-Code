@@ -368,6 +368,80 @@ int PyDict_DelItem(PyObject* op, PyObject* key){
   PyObject* old_value, *old_key;
 
   //获得hash值
-  if(!PyString_CheckExact(key))
+  if(!PyString_CheckExact(key) || (hash = (PyStringObject *)key->ob_shash) == -1){
+    hash = PyObject_Hash(key);
+    if(hash == -1)
+        return -1;
+  }
+
+  //搜索entry
+  mp = (dictobject *)op;
+  ep = (mp->ma_lookup)(mp,key,hash);
+  if(ep->me_value == NULL){ //搜索失败,entry不存在
+    return -1;
+  }
+
+  //删除entry所维护的元素,将entry的状态转化为dummy态
+  old_key = ep->me_key;
+  ep->me_key = dummy;
+  old_value = ep->me_value;
+  ep->me_value = NULL;
+  mp->ma_used--;
+  Py_DECREF(old_value);
+  Py_DECREF(old_key);
+  return 0;
+}
+```
+
+#### d.PyDictObject对象缓冲池
+
+```c
+[dictobject.c]
+#define MAXFREEDICTS 80
+static PyDictObject* free_dicts[MAXFREEDICTS];
+static int num_free_dicts = 0;
+```
+
+```c
+[dictobject.c]
+static void dict_dealloc(register dictobject* mp){
+  register dictentry* ep;
+  Py_ssize_t fill = mp->ma_fill;
+
+  //调整dict中对象的引用计数
+  for(ep = mp->ma_table; fill > 0; ep++){
+    if(ep->me_key){
+      --fill;
+      Py_DECREF(ep->me_key);
+      Py_XDECREF(ep->me_value);
+    }
+  }
+
+  //释放从系统堆中申请的内存空间
+  if(mp->ma_table != mp->ma_smalltable)
+    PyMem_DEL(mp->ma_table);
+
+  //将被销毁的PyDictObject对象放入缓冲池
+  if(num_free_dicts < MAXFREEDICTS && mp->ob_type == &PyDict_Type)
+    free_dicts[num_free_dicts++] = mp;
+  else
+    mp->ob_type->tp_free((PyObject *)mp);
+}
+```
+
+```c
+/* 在创建新的PyDictObject对象时，如果在缓冲池中有可以使用的对象，则直接从缓冲中取出使用 */
+[dictobject.c]
+PyObject* PyDict_New(void){
+  register dictobject *mp;
+  .....
+  if(num_free_dicts){
+    mp = free_dicts[--num_free_dicts];
+    _Py_NewReference((PyObject *)mp);
+    if(mp->ma_fill){
+      EMPTY_TO_MINSIZE(mp);
+    }
+  }
+  .....
 }
 ```
