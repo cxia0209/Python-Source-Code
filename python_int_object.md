@@ -72,9 +72,9 @@ PyTypeObject PyInt_Type = {
 ```c
 /* int_compare定义 */
 [intobject.c]
-static int int_compare(PyObject *v, PyObject *w){
+static int int_compare(PyIntObject *v, PyIntObject *w){
   register long i = v->ob_ival;
-  register long j = w->ob->ival;
+  register long j = w->ob_ival;
   return (i < j) ? -1 : (i > j) ? 1 : 0;
 }
 ```
