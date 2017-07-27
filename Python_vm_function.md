@@ -603,3 +603,214 @@ def compare(base,value):
 compare(10,5)
 compare(10,20)
 ```
+
+```python
+[compare2.py]
+base = 1
+def get_compare(base):
+  def real_compare(value):
+    return value > base
+  return real_compare
+
+compare_with_10 = get_compare(10)
+print compare_with_10(5)
+print compare_with_10(20)
+```
+
+```python
+[compare3.py]
+base = 1
+def get_compare(base):
+  def real_compare(value,base = base):
+    return value > base
+  return real_compare
+
+compare_with_10 = get_compare(10)
+print compare_with_10(5)
+print compare_with_10(20)
+print compare_with_10(5,1)
+```
+
+> 实现闭包的基石
+
+<p>在PyCodeObject中，与嵌套函数相关的属性是co_cellvars和co_freevars</p>
+
+<p>co_cellvars：通常是一个tuple，保存嵌套的作用域中使用的变量名集合</p>
+
+<p>co_freevars：通常是一个tuple，保存使用了的外层作用域中的变量名集合</p>
+
+```python
+[closure.py]
+def get_func():
+  value = "inner"
+  def inner_func():
+    print value
+  return inner_func
+
+show_value = get_func()
+show_value()
+```
+
+<p>在PyFrameObject对象中，与闭包相关的属性是f_localsplus</p>
+
+![f_localsplus](/image/f_localsplus.png)
+
+
+> 闭包的实现
+
+>> 创建closure
+
+```c
+[ceval.c]
+PyObject* PyEval_EvalCodeEx(...){
+  ...
+  if(PyTuple_GET_SIZE(co->co_cellvars)){
+    int i,j,nargs,found;
+    char* cellname, *argname;
+    PyObject* c;
+    ....
+    for( i = 0; i < PyTuple_GET_SIZE(co->co_cellvars); ++i){
+      //获得被嵌套函数共享的符号名
+      cellname = PyString_AS_STRING(PyTuple_GET_ITEM(co->co_cellvars,i)); //cellname是在处理内层嵌套函数引用外层函数的默认参数时产生的
+      found = 0;
+      ...//处理被嵌套函数共享外层函数的默认参数
+      if(found == 0){
+        c = PyCell_New(NULL);
+        if(c == NULL){
+          goto fail;
+        }
+
+        SETLOCAL(co->co_nlocals + i, c);
+      }
+    }
+  }
+}
+
+[cellobject.h]
+typedef struct {
+  PyObject_HEAD
+  PyObject* ob_ref; /* Content of the cell or NULL when empty */
+} PyCellObject;
+
+[cellobject.c]
+PyObject* PyCell_New(PyObject* obj){
+  PyCellObject* op;
+  op = (PyCellObject *)PyObject_GC_New(PyCellObject,&PyCell_Type);
+  op->ob_ref = obj;
+  Py_XINCREF(obj);
+  _PyObject_GC_TRACK(op);
+  return (PyObject *)op;
+}
+```
+
+```c
+//STORE_DEREF
+[PyEval_EvalFrameEx]
+freevars = f->f_localsplus + co->co_nlocals
+
+[STORE_DEREF]
+w = POP()
+x = freevars[oparg];
+PyCell_Set(x,w);
+Py_DECREF(w);
+
+
+//设置PyCellObject对象中的ob_ref
+[cellobject.h]
+#define PyCell_SET(op,v) (((PyCellObject *)(op))->ob_ref = v)
+[cellobject.c]
+int PyCell_SET(PyObject* op, PyObject* obj){
+  Py_XDECREF(((PyCellObject *)op)->ob_ref);
+  Py_XINCREF(obj);
+  PyCell_SET(op,obj);
+  return 0;
+}
+```
+
+![cell_after](/image/cell_after.png)
+
+```c
+//将(value,"inner")约束塞入PyFunctionObject
+[LOAD_CLOSURE]
+x = freevars[oparg];
+Py_INCREF(x);
+PUSH(x);
+```
+
+```c
+//MAKE_CLOSURE 指令完成约束与PyCodeObject的绑定
+[MAKE_CLOSURE]
+{
+  v = POP(); //获得PyCodeObject对象
+  x = PyFunction_New(v,f->f_globals); //绑定global名字空间
+  v = POP(); //获得tuple,其中包含PyCellObject对象的集合
+  err = PyFuntion_SetClosure(x,v); 绑定约束集合
+  .../处理拥有默认值的参数
+  PUSH(x);
+}
+```
+
+![get_func_after_func](/image/get_func_after_func.png)
+
+>> 使用closure
+
+<p>closure实在get_func中被创建的,在inner_func中被使用的</p>
+
+```c
+\\CALL_FUNCTION中,inner_func对应的PyCodeObject中的co_flags里包含了CO_NESTED，不能通过快速通道
+[ceval.c]
+PyObject* PyEval_EvalCodeEx(...){
+  ...
+  if(PyTuple_GET_SIZE(co->co_freevars)){
+    int i;
+    for(i = 0; i < PyTuple_GET_SIZE(co->co_freevars); ++i){
+      PyObject* o = PyTuple_GET_ITEM(closure,i);
+      freevars[PyTuple_GET_SIZE(co->co_cellvars) + i] = o;
+    }
+  }
+}
+
+[funcobject.h]
+#define PyFunction_GET_CLOSURE(func) (((PyFunctionObject *)func)->func_closure)
+
+[ceval.c]
+PyObject* fast_function(...){
+  ...
+  return PyEval_EvalCodeEx(...,PyFunction_GET_CLOSURE(func));
+}
+```
+
+![inner_func_frame](/image/inner_func_frame.png)
+
+```c
+[LOAD_DEREF]
+x = freevars[oparg]; //获得PyCellObject对象
+w = PyCell_Get(x); //获得PyCellObject, ob_obj指向的对象
+if( w != NULL){
+  PUSH(w);
+  continue;
+}
+....
+```
+
+> decorator
+
+<p>基于closure技术上,实现了decorator</p>
+
+```python
+[decorator.py]
+def should_say(fn):
+  def say(*args):
+    print 'say something...'
+    fn(*args)
+  return say
+
+@should_say
+def func():
+  print 'in func'
+
+//输出结果为
+//say something
+// in func
+func()  // == func = should_say(func)
+```
