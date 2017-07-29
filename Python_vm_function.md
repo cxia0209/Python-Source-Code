@@ -812,5 +812,5 @@ def func():
 //输出结果为
 //say something
 // in func
-func()  // == func = should_say(func)
+func()  // 相当于 func = should_say(func)
 ```
