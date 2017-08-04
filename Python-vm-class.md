@@ -437,3 +437,504 @@ a.g(10)
 > 创建class对象
 
 >> class的动态元信息
+
+```python
+[PyCodeObject for class_0.py]
+class A(object):
+0 LOAD_CONST 0 (A)
+3 LOAD_NAME  0 (object)
+6 BUILD_TUPLE  1
+9 LOAD_CONST  1 (code object for A)
+12 MAKE_FUNCTION  0
+15 CALL_FUNCTION  0
+
+
+18 BUILD_CLASS
+19 STORE_NAME  1 (A)
+```
+
+![make_function](/image/make_function.png)
+
+```python
+[PyCodeObject for class A]
+0 LOAD_NAME 0 (__name__)
+3 STORE_NAME 1 (__module__)
+name = 'Python'
+6 LOAD_CONST 0 ('Python')
+9 STORE_NAME 2 (name)
+def __init__(self):
+12 LOAD_CONST 1 (code object for function __init__)
+15 MAKE_FUNCTION 0
+18 STORE_NAME 3 (__init__)
+def f(self):
+21 LOAD_CONST 2 (code object for function f)
+24 MAKE_FUNCTION 0
+27 STORE_NAME 4 (f)
+def g(self,aValue):
+30 LOAD_CONST 3 (code object for function g)
+33 MAKE_FUNCTION 0
+36 STORE_NAME 5 (g)
+
+39 LOAD_LOCALS
+40 RETURN_VALUE
+```
+
+```c
+[LOAD_LOCALS]
+if((x = f->f_locals) != NULL){
+  PUSH(x);
+  continue;
+}
+```
+
+```c
+[CALL_FUNCTION]
+PyObject **sp;
+sp = stack_pointer;
+x = call_function(&sp,oparg);
+stack_pointer = sp;
+PUSH(x);
+```
+
+![call_function_stack](/image/call_function_stack.png)
+
+>> metaclass
+
+```c
+[BUILD_CLASS]
+u = TOP(); //class的动态元信息f_locals
+v = SECOND(); // class 的基类列表
+w = THIRD(); //class的名'A'
+STACKADJ(-2);
+x = build_class(u,v,w);
+SET_TOP(x);
+Py_DECREF(u);
+Py_DECREF(v);
+Py_DECREF(w);
+```
+
+![class_A_build_class](/image/class_A_build_class.png)
+
+>> 获得metaclass
+
+```c
+[ceval.c]
+PyObject* build_class(PyObject* methods, PyObject* bases, PyObject* name){
+  PyObject* metaclass = NULL,*result, *base;
+
+  //检查属性表中是否有指定的_metaclass_
+  if(PyDict_Check(methods))
+    metaclass = PyDict_GetItemString(methods,"__metaclass__"); //metaclass为静态元信息，methods为动态元信息
+  if(metaclass != NULL)
+    Py_INCREF(metaclass);
+  else if(PyTuple_Check(bases) && PyTuple_GET_SIZE(bases) > 0){
+    // 获得A的第一基类,object
+    base = PyTuple_GET_ITEM(bases,0)
+    //获得object.__class__
+    metaclass = PyObject_GetAttrString(base,"__class__");
+  }
+  else{
+    ....
+  }
+  result = PyObject_CallFunctionObjArgs(metaclass,name,bases,methods,NULL);
+  ...
+  return result;
+}
+```
+
+![explain_meta_dynamic](/image/explain_meta_dynamic.png)
+
+![meta_dynamic](/image/meta_dynamic.png)
+
+>> 调用metaclass
+
+```c
+[object.h]
+typedef PyObject* (*ternaryfunc)(PyObject *, PyObject *, PyObject *);
+
+[abstract.c]
+PyObject* PyObject_Call(PyObject* func,PyObject* arg,PyObject* kw){
+  //arg即是PyObject_CallFunctionObjArgs中打包得到的tuple对象
+  ternaryfunc call = func->ob_type->tp_call;
+  PyObject* result = (*call)(func,arg,kw);
+  return result;
+}
+
+[typeobject.c]
+type_call(PyTypeObject* type, PyObject* args, PyObject* kwds){
+  PyObject* obj;
+
+  obj = type->tp_new(type,args,kwds);
+
+  ...//如果创建的是实例对象，则调用"__init__" 进行初始化
+  return obj;
+}
+
+[typeobject.c]
+static PyObject* type_new(PyTypeObject* metatype, PyObject* args, PyObject* kwds){
+  //metatype是PyType_Type<type 'type'>,args中包含了(类名，基类列表，属性表)
+  PyObject* name,*bases, *dict;
+  static char* kwlist[] = {"name","bases","dict",0};
+  PyTypeObject* type,*base,*tmptype,*winner;
+  PyHeapTypeObject* et;
+  Py_ssize_t slotoffset;
+
+  //将args中的（类名，基类列表，属性表）分别解析到name,bases,dict三个变量中
+  PyArg_ParseTupleAndKeywords(args,kwds,"SO!O!:type",kwlist,
+                              &name,
+                              &PyTuple_Type,&bases.
+                              &PyDict_Type,&dict);
+  .....//确定最佳metaclass,存储在PyObject* metatype中
+  ....//确定最佳base,存储在PyObject* base中
+
+  //为class对象申请内存
+  //尽管PyType_Type为0,但PyBaseObject_Type的为PyType_GenericAlloc,
+  //在PyType_Ready中被继承了
+  //创建的内存大小为tp_basicsize _ tp_itemsize
+  type = (PyTypeObject *)metatype->tp_alloc(metatype,nslots);
+  et = (PyHeapTypeObject *)type;
+  et->ht_name = name;
+
+  //设置PyTypeObject中的各个域
+  type->tp_as_number = &et->as_number;
+  type->tp_as_sequence = &et->as_sequence;
+  type->tp_as_mapping = &et->as_mapping;
+  type->tp_as_buffer = &et->as_buffer;
+  type->tp_name = PyString_AS_STRING(name);
+
+  //设置基类和基类列表
+  type->tp_bases = bases;
+  type->tp_base = base;
+
+  //设置属性表
+  type->tp_dict = dict = PyDict_Copy(dict);
+
+  //如果自定义class中重写了__new__，将__new__对应的函数改造为static函数
+  tmp = PyDict_GetItemString(dict,"__new__");
+  tmp = PyStaticMethod_New(tmp);
+  PyDict_SetItemString(dict,"__new__",tmp);
+
+  //为class对象对应的instance对象设置内存大小信息
+  slotoffset = base->basicsize;
+  type->tp_dictoffset = slotoffset;
+  slotoffset += sizeof(PyObject *);
+  type->tp_weaklistoffset = slotoffset;
+  slotoffset += sizeof(PyObject *);
+  type->tp_basicsize = slotoffset;
+  type->tp_itemsize = base->tp_itemsize;
+  ......
+
+  //调用PyType_Ready(type)对class对象进行初始化
+  PyType_Ready(type);
+  return (PyObject *)type;
+}
+```
+
+![compare_user_bulitin](/image/compare_user_bulitin.png)
+
+#### d.从class对象到instance对象
+
+```python
+[PyCodeObject for class_0.py]
+a = A()
+22 LOAD_NAME 1 (A)
+25 CALL_FUNCTION 0
+28 STORE_NAME 2 (a)
+```
+
+![instance_local](/image/instance_local.png)
+
+<p>创建class对象，Python虚拟机使用的是type_new；而对于instance对象，Python虚拟机则使用object_new</p>
+
+```c
+[typeobject.c]
+type_call(PyTypeObject* type, PyObject* args, PyObject* kwds){
+  PyObject* obj;
+
+  obj = type->tp_new(type,args,kwds);
+
+  type = obj->ob_type;  //如果创建的是实例对象，则调用"__init__" 进行初始化
+  type->tp_init(obj,args,kwds);
+  return obj;
+}
+```
+
+```c
+//由于A重写了__init__，所以在fixup_slot_dispatchers中,tp_init会指向slotdefs中指定的与"__init__"对应的slot_tp_init
+[typeobject.c]
+static int slot_tp_init(PyObject* self, PyObject* args, PyObject* kwds){
+  static PyObject* init_str;
+  PyObject* meth = lookup_method(self,"__init__",&init_str);
+  PyObject_Call(meth,args,kwds);
+  return 0;
+}
+```
+
+![class_to_instance](/image/class_to_instance.png)
+
+#### e.访问instance对象中的属性
+
+```python
+[PyCodeObject for class_0.py]
+a.f()
+31 LOAD_NAME 2 (a)
+34 LOAD_ATTR 3 (f)
+37 CALL_FUNCTION 0
+40 POP_TOP
+```
+
+```c
+[LOAD_ATTR]
+w = GETITEM(names,oparg);  //PyStringObject对象"f"
+v = TOP(); //instance对象
+x = PyObject_GetAttr(v,w);
+Py_DECREF(v);
+SET_TOP(x);
+```
+
+```c
+[object.c]
+PyObject* PyObject_GetAttr(PyObject* v, PyObject* name){
+  PyTypeObject* tp = v->ob_type;
+  //通过tp_getattro获得属性对应对象
+  if(tp->tp_getattro != NULL)  //优先调用
+    return (*tp->tp_getattro)(v,name);
+
+  //通过tp_getattr获得属性对应对象
+  if(tp->tp_getattr != NULL)
+    return (*tp->tp_getattr)(v,PyString_AS_STRING(name));
+
+  //属性不存在，排除异常
+  PyErr_Format(PyExc_AttributeError, "'%.50s' object has no attribute '%.400s'",tp->tp_name,PyString_AS_STRING(name));
+  return NULL;
+}
+
+```
+
+
+```python
+#属性访问算法
+#首先寻找'f'对应的descriptor
+#注意：hasattr会在<class A>的mro列表中寻找符号'f'
+if hasattr(A,'f'):
+  descriptor = A.f
+
+type = descriptor.__class__
+if hasattr(type,'__get__') and (hasattr(type,'__set__') or 'f' not in a.__dict__):
+  return type.__get__(descriptor,a,A)
+
+# 通过descriptor访问失败,在instance对象自身__dict__中寻找属性
+if 'f' in a.__dict__:
+  return a.__dict__['f']
+
+#instance对象的__dict__中找不到属性,返回a的基类列表中某个基类里定义的函数
+# 注意：这里的descriptor实际指向了一个普通函数
+if descriptor:
+  return descriptor.__get__(descriptor,a,A)
+
+```
+
+> instance对象中的__dict__
+
+![a__dict__](/image/a__dict__.png)
+
+```c
+//PyObject_GenericGetAttr
+[object.c]
+PyObject* PyObject_GenericGetAttr(PyObject* obj, PyObject* name){
+  PyTypeObject* tp = obj->ob_type;
+  PyObject* res = NULL;
+  Py_ssize_t dictoffset;
+  PyObject** dictptr;
+
+  //inline _PyObject_GetDictPtr函数的代码
+  dictoffset = tp->tp_dictoffset;
+  if(dictoffset != 0){
+    PyObject* dict;
+    if(dictoffset < 0){
+      ...//处理变长对象
+    }
+    dictptr = (PyObject **)((char *)obj + dictoffset);
+    dict = *dictptr;
+    res = PyDict_GetItem(dict,name);
+  }
+  ....
+}
+```
+
+```c
+//PyObject_GenericSetAttr
+[object.c]
+int PyObject_GenericSetAttr(PyObject* obj, PyObject* name, PyObject* value){
+  PyTypeObject* tp = obj->ob_type;
+  PyObject** dictptr;
+  ....
+  dictptr = _PyObject_GetDictPtr(obj);
+  if(dictptr != NULL){
+    PyObject* dict = *dictptr;
+    if(dict == NULL && value != NULL){
+      //这里创建了instance对象中的__dict__
+      dict = PyDict_New();
+      *dictptr = dict;
+    }
+    ....
+  }
+  ....
+}
+```
+
+> 再论descriptor
+
+<p>一般而言,对于一个Python中的对象obj,如果obj.__class__ 对应的class对象中存在__get__、__set__、__delete__三种操作，那么obj为Python的一个descriptor</p>
+
+```c
+[slotdefs in typeobject.c]
+.....
+TPSLOT("__get__",tp_descr_get,...),
+TPSLOT("__set__",tp_descr_set,....),
+TPSLOT("__delete__",tp_descr_set,....)
+```
+
+<p>如果细分，那么descriptor还可以分为如下两种:</p>
+
+>> data descriptor: type中定义了__get__和__set__的descriptor
+
+>> non data descriptor: type中只定义了__get__的descriptor
+
+![get_attr](/image/get_attr.png)
+
+<p>如果待访问的属性是一个descriptor，若它存在于class对象的tp_dict中，会调用其__get__方法；若它存在于instance对象的tp_dict中，则不会调用其__get__方法</p>
+
+![descriptor](/image/descriptor.png)
+
+> 函数变身
+
+```c
+//PyFunction_Type中，"__get__"对应的tp_descr_get被设置成了&func_descr_get，意味着A.f实际上是一个descriptor
+//又由于PyFunction_Type并没有设置tp_descr_set，所以A.f是一个non data descriptor
+//并且a.__dict__中没有符号'f'的存在,所以a.f的返回值将被descriptor改变，结果将是A.f.__get__,也就是func_descr_get(A.f,a,A)
+[funcobject.c]
+/* Bind a function to an object */
+static PyObject* func_descr_get(PyObject* func,PyObject* obj, PyObject* type){
+  if(obj == Py_None)
+    obj = NULL;
+  return PyMethod_New(func,obj,type);
+}
+
+[classobject.c]
+PyObject* PyMethod_New(PyObject* func, PyObject* self, PyObject* class){
+  register PyMethodObject* im;
+  im = free_list;
+  if(im != NULL){
+    //使用缓冲池
+    free_list = (PyMethodObject *)(im->im_self);
+    PyObject_INIT(im,&PyMethod_Type);
+  }
+  else{
+    //不使用缓冲池，直接创建PyMethodObject
+    im = PyObject_GC_New(PyMethodObject,&PyMethod_Type);
+  }
+
+  im->im_weakreflist = NULL;
+  im->im_func = func;
+  //这里就是"self" ~~~!!!
+  im->im_self = self;
+  im->im_class = class;
+  _PyObject_GC_TRACK(im);
+  return (PyObject *)im;
+}
+```
+
+```c
+//PyMethodObject
+[classobject.h]
+typedef struct {
+  PyObject_HEAD
+  PyObject* im_func;   //可调用的PyFunctionObject对象,'f'
+  PyObject* im_self;   //用于成员函数调用的self参数，instance对象(a)
+  PyObject* im_class;   //class对象(A)
+  PyObject* im_weakreflist;
+} PyMethodObject;
+```
+
+> 无参函数的调用
+
+```c
+[ceval.c]
+static PyObject* call_function(PyObject** pp_stack, int oparg){
+  int na = oparg & 0xff;
+  int nk = (oparg>>8) & 0xff;
+  int n = na + 2*nk;
+  PyObject** pfunc = (*pp_stack) - n - 1;
+  PyObject* func = *pfunc;
+  PyObject* x, *w;
+
+  if(PyCFunction_Check(func) && nk == 0){
+    ....
+  }else{
+    //从PyMethodObject对象中抽取PyFunctionObject对象和self参数
+    if(PyMethod_Check(func) && PyMethod_GET_SELF(func) != NULL){
+      PyObject* self = PyMethod_GET_SELF(func);
+      func = PyMethod_GET_FUNCTION(func);
+      //self参数入栈，调整参数信息变量
+      *pfunc = self;
+      na++;
+      n++;
+    }
+    if(PyFunction_Check(func))
+      x = fast_function(func,pp_stack,n,na,nk);
+    else
+      x = do_call(func,pp_stack,na,nk);
+  }
+  ....
+  return x;
+}
+```
+
+![self](/image/self.png)
+
+> 带参函数的调用
+
+> Bound Method(a.f) 和 Unbound Method(A.f)
+
+<p>本质区别在于PyFunctionObject有没有与instance对象绑定在PyMethodObject中, Bound Method 完成了绑定动作，而Unbound Method 没有完成绑定动作</p>
+
+> 千变万化的descriptor
+
+>> 用descriptor实现static method
+
+```python
+[class_2.py]
+class A(object):
+  def g(value):
+    print value
+  g = staticmethod(g)  #staticmethod存在于Python启动并进行初始化设置的builtin名字空间中
+```
+
+```c
+[funcobject.c]
+typedef struct {
+  PyObject_HEAD
+  PyObject* sm_callable;
+} staticmethod;
+
+[funcobject.c]
+static int sm_init(PyObject* self,PyObject* args, PyObject* kwds){
+  staticmethod* sm = (staticmethod *)self;
+  PyObject* callable;
+
+  PyArg_UnpackTuple(args,"staticmethod",1,1,&callable);
+  sm->sm_callable = callable;
+  return 0;
+}
+```
+
+<p>PyStaticMethod_Type，创建的staticmethod实际上也是一个descriptor，在PyStaticMethod_Type中，tp_descr_get指向了sm_descr_get</p>
+
+```c
+[funcobject.c]
+static PyObject* sm_descr_get(PyObject* self, PyObject* obj, PyObject* type){
+  staticmethod* sm = (staticmethod *)self;
+  return sm->sm_callable;
+}
+```
