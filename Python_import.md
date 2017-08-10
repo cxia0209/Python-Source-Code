@@ -506,3 +506,85 @@ EXPORT int initabc(void){
 #define Py_InitModule(name,methods)
   Py_InitModule4(name,methods,(char *)NULL,(PyObject *)NULL,PYTHON_API_VERSION)
 ```
+
+> from与import
+
+```c
+[import.c]
+static PyObject* import_module_level(char* name, PyObject* globals, PyObject* locals, PyObject* fromlist, int level){
+  ...
+
+  //处理from *** import ** 语句
+  if(fromlist != NULL){
+    if(fromlist == Py_None || !PyObject_IsTrue(fromlist))
+      fromlist = NULL;
+  }
+
+  //import的形式不是from *** import **返回head
+  if(fromlist == NULL){
+    return head;
+  }
+
+  //import的形式是from ** import ** 返回tail
+  if(!ensure_fromlist(tail,fromlist,buf,buflen,0)){
+    return NULL;
+  }
+  return tail;
+}
+```
+
+```c
+static int ensure_fromlist(PyObject* mod, PyObject* fromlist, char* buf, Py_ssize_t buflen, int recursive){
+  int i;
+  for(i = 0; ; i++){
+    PyObject* item = PySequence_GetItem(fromlist,i);
+    //若item为NULL，则结束ensure动作
+    if(item == NULL){
+      return 0;
+    }
+
+    if(PyString_AS_STRING(item)[0] == '*'){
+      PyObject* all;
+      /* See if the package defines __all__ */
+      all = PyObject_GetAttrString(mod,"__all___");
+      int ret = ensure_fromlist(mod,all,buf,buflen,1);
+      continue;
+    }
+    hasit = PyObject_HasAttr(mod,item);
+    //hasit为false，意味着出现"from A import mod2"这样的情形
+    if(!hasit){
+      char* subname = PyString_AS_STRING(item);
+      PyObject* submod;
+      char* p;
+      p = buf + buflen;
+      *p++ = '.';
+      strcpy(p,subname);
+      submod = import_submodule(mod,subname,buf);
+    }
+  }
+}
+```
+
+#### e.Python中的import操作
+
+```c
+//from xml.sax import xmlreader
+[IMPORT_FROM]
+w = GETITEM(names,oparg); //xmlreader
+v = TOP(); //xml.sax
+x = import_from(v,w);
+PUSH(x);
+
+[ceval.c]
+static PyObject* import_from(PyObject*v, PyObject* name){
+  PyObject* x;
+
+  x = PyObject_GetAttr(v,name);
+  if(x == NULL && PyErr_ExceptionMatches(PyExc_AttributeError)){
+    PyErr_Format(PyExc_ImportError,"cannot import name %.230s", PyString_AsString(name));
+  }
+  return x;
+}
+```
+
+#### f.与module有关的名字空间问题
