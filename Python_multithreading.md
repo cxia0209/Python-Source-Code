@@ -458,3 +458,227 @@ PyObject* PyEval_EvalFrameEx(PyFrameObject* f){
 int _Py_CheckInterval = 100;
 volatile int _Py_Ticker = 100;
 ```
+
+#### e.Python子线程的销毁
+
+```c
+[threadmodule.c]
+static void t_bootstrap(void* boot_raw){
+  struct bootstate* boot = (struct bootstate *)boot_raw;
+  PyThreadState* tstate;
+  PyObject* res;
+
+  tstate = PyThreadState_New(boot->interp);
+  PyEval_AcquireThread(tstate);
+  res = PyEval_CallObjectWithKeywords(boot->func,boot->args,boot->keyw);
+  PyMem_DEL(boot_raw);
+  PyThreadState_Clear(tstate);
+  PyThreadState_DeleteCurrent();
+  PyThread_exit_thread();
+}
+```
+
+<p>Python首先通过PyThreadState_Clear清理当前线程所对应的线程状态对象</p>
+
+```c
+//PyThreadState_DeleteCurrent释放GIL
+[pystate.c]
+void PyThreadState_DeleteCurrent(){
+  PyThreadState* tstate = _PyThreadState_Current;
+  _PyThreadState_Current = NULL;
+  tstate_delete_common(tstate);
+  if(autoTLSkey && PyThread_get_key_value(autoTLSkey) == tstate)
+    PyThread_delete_key_value(autoTLSkey);
+  PyEval_ReleaseLock();
+}
+```
+
+<p>Python最后通过PyThread_exit_thread完成各个平台上不同的销毁原声线程的工作</p>
+
+#### f.Python线程的用户级互斥与同步
+
+> 用户级互斥与同步
+
+>> Lock对象
+
+```c
+[threadmodule.c]
+static PyObject* thread_PyThread_allocate_lock(PyObject* self){
+  return (PyObject *)newlockobject();
+}
+
+static lockobject* newlockobject(void){
+  lockobject* self;
+  self = PyObject_New(lockobject,&Locktype);
+  self->lock_lock = PyThread_allocate_lock();
+  return self;
+}
+
+[pythread.h]
+typedef void* PyThread_type_lock;
+
+[threadmodule.c]
+typedef struct {
+  PyObject_HEAD
+  PyThread_type_lock lock_lock;
+} lockobject;
+
+[threadmodule.c]
+static PyMethodDef lock_method[] = {
+  {"acquire_lock",(PyCFunction)lock_PyThread_acquire_lock,...}
+  {"acquire",(PyCFunction)lock_PyThread_acquire_lock,...}
+  {"release_lock",(PyCFunction)lock_PyThread_release_lock,...}
+  {"release",(PyCFunction)lock_PyThread_release_lock,...}
+  {"locked_lock",(PyCFunction)lock_locked_lock,...}
+  {"locked",(PyCFunction)lock_locked_lock,..}
+  {NULL,NULL} /* sentinel */
+}
+```
+
+```c
+//申请用户级的lock，这个申请在lock.acquire中完成，对应的C函数为lock_PyThread_acquire_lock
+[threadmodule.c]
+static PyObject* lock_PyThread_acquire_lock(lockobject* self,PyObject* args){
+  //i中保存用户传入的参数，表示是否在lock资源不可用时将自身挂起，进行等待
+  int i = 1;
+  PyArg_ParseTuple(args,"|i:acquire",&i);
+
+  Py_BEGIN_ALLOW_THREADS
+  i = PyThread_acquire_lock(self->lock_lock,i)
+  Py_END_ALLOW_THREADS
+}
+
+static PyObject* lock_PyThread_release_lock(lockobject* self){
+  /* Sanity check: the lock must be locked */
+  if(PyThread_acquire_lock(self->lock_lock,0)){
+    PyThread_release_lock(self->lock_lock);
+    PyErr_SetString(ThreadError,"release unlocked lock");
+    return NULL;
+  }
+
+  PyThread_release_lock(self->lock_lock);
+  Py_INCREF(Py_None);
+  return Py_None;
+}
+```
+
+#### g.高级线程库--threading
+
+> Threading Module 概述
+
+```python
+[threading.py]
+import thread
+
+_start_new_thread = thread.start_new_thread
+_allocate_lock = thread.allocate_lock
+_get_ident = thread.get_ident
+ThreadError = thread.error
+```
+
+```python
+[threading.py]
+# Active thread administration
+_active_limbo_lock = _allocate_lock()
+_active = {} // _active[thread_id] = thread 已经创建子线程
+_limbo = {}  //_limbo[thread] = thread 在未创建原生子线程
+```
+
+```python
+# 列举当前所有子线程的操作
+[threading.py]
+def enumerate():
+  _active_limbo_lock.acquire()
+  active = _active.values() + _limbo.values()
+  _active_limbo_lock.release()
+  return active
+```
+
+> Threading 的线程同步工具
+
+```c
+[threading.py]
+_allocate_lock = thread.allocate_lock
+Lock = _allocate_lock
+```
+
+>> RLock
+
+<p>可重入的Lock</p>
+
+>> Condition
+
+<p>需要一个Lock对象作为参数,否则将在内部自行创建一个RLock对象,提供了wait和notify语义</p>
+
+>> Semaphore
+
+<p>Semaphore对象内部维护着一个Condition对象,管理共享资源池</p>
+
+>> Event
+
+> Threading 中的 Thread
+
+```python
+[threading.py]
+class Thread(_Verbose):
+  __initialized = False
+  def __init__(self,group=None, target=None, name=None, args=(),kwargs={},verbose=None):
+    ...
+    self.__name = str(name or _newname())
+    self.__started = False
+    self.__stopped = False
+    self.__block = Condition(Lock())
+    self.__initialized = True
+
+  def start(self):
+    _active_limbo_lock.acquire()
+    _limbo[self] = self
+    _active_limbo_lock.release()
+    _start_new_thread(self.__bootstrap,{})
+    _sleep(0.000001)
+
+  def run(self):
+    if self.__target:
+      self.__target(*self.__args,**self.__kwargs)
+
+  def __bootstrap(self):
+    try:
+      self.__started = True
+      _active_limbo_lock.acquire()
+      _active[_get_ident()] = self
+      del _limbo[self]
+      _active_limbo_lock.release()
+      try:
+        self.run()
+    finally:
+      self.__stop()
+      try:
+        self.__delete()
+      except:
+        pass
+
+  def __stop(self):
+    self.__block.acquire()
+    self.__stopped = True
+    self.__block.notifyAll()
+    self.__block.release()
+
+  def join(self,timeout=None):
+    self.__block.acquire()
+    if timeout is None:
+      while not self.__stopped:
+        self.__block.wait()
+    else:
+      deadline = _time() + timeout
+      while not self.__stopped:
+        delay = deadline - _time()
+        if delay <= 0:
+          if __debug__:
+            self._note("%s.join(): timed out",self)
+          break
+        self.__block,wait(delay)
+      else:
+        if __debug__:
+          self._note("%s.joi(): thread stopped",self)
+    self.__block.release()
+```
