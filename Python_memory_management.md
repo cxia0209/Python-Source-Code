@@ -355,4 +355,24 @@ static poolp usedpools[2 * (NB_SMALL_SIZE_CLASSES + 7)/8 * 8] = {
     ...
   #endif
 }
+
+//NB_SMALL_SIZE_CLASSES
+[obmalloc.c]
+#define NB_SMALL_SIZE_CLASSES (SMALL_REQUEST_THRESHOLD / ALIGNMENT)
+```
+
+```c
+[obmalloc.c]
+void* PyObject_Malloc(size_t nbytes){
+  block* bp;
+  poolp pool;
+  poolp next;
+  uint size;
+
+  if((nbytes - 1) < SMALL_REQUEST_THRESHOLD){
+    LOCK();
+    //获得size class index
+
+  }
+}
 ```
