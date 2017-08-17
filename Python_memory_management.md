@@ -683,3 +683,423 @@ void PyObject_Free(void *p){
   }
 }
 ```
+
+<p>对arena的处理分为了4种情况</p>
+
+>> 如果arena中所有pool都是empty的，释放pool集合占用的内存
+
+```c
+[obmalloc.c]
+void PyObject_Free(void *p){
+  poolp pool;
+  block* lastfree;
+  poolp next,prev;
+  uint size;
+
+  pool = POOL_ADDR(p);
+  struct arena_object* ao;
+  uint nf; //ao->nfreepools
+  ...
+
+  //将pool放入freepools维护的链表中
+  ao = &arenas[pool->arenaindex];
+  pool->nextpool = ao->freepools;
+  ao->freepools = pool;
+  nf = ++ao->nfreepools;
+  if(nf == ao->ntotalpools ){
+    //调整usable_arenas链表
+    if(ao->prevarena == NULL){
+      usable_arenas = ao->nextarena;
+    }else{
+      ao->prevarena->nextarena = ao->nextarena;
+    }
+
+    if(ao->nextarena != NULL){
+      ao->nextarena->prevarena = ao->prevarena;
+    }
+
+    //调整unused_arena_objects链表
+    ao->nextarena = unused_arena_objects;
+    unused_arena_objects = ao;
+
+    //释放内存
+    free((void *)ao->address);
+
+    //设置address,将arena的状态转换为“未使用”
+    ao->address = 0;
+    --narenas_currently_allocated;
+  }
+  ....
+}
+```
+
+![python_arena](\image\python_arena.png)
+
+
+>> 内存池全景
+
+![python_memory_scenrio](\image\python_memory_scenrio.png)
+
+#### c.循环引用的垃圾收集
+
+> 引用计数与垃圾收集
+
+<p>python大量使用的面向特定对象的对象内存池机制正是为了竭力弥补引用计数机制的软肋</p>
+
+<p>python中引入了主流垃圾收集技术中的*标记-清除 和 分代收集*来填补其内存管理机制中最后也是最致命的漏洞</p>
+
+>> 三色标记模型
+
+<p>垃圾收集机制的两个阶段:垃圾检测和垃圾回收</p>
+
+<p>标记-清除方法的两个阶段</p>
+
+![mark_sweep](\image\mark_sweep.png)
+
+<p>在垃圾收集动作被激活之前，系统中所分配的所有对象和对象之间的引用组成了一张有向图，其中对象是图中的节点，对象间的引用是图的边</p>
+
+#### d.Python中的垃圾收集
+
+<p>解决循环引用只需要去检查container对象(list,dict),而不用去关心PyIntObject...</p>
+
+<p>python采用了一个双向链表，所有的container对象在创建之后，都会被插入到这个链表中</p>
+
+>> 可收集对象链表
+
+```c
+[objimpl.h]
+typedef union _gc_head{
+  struct {
+    union _gc_head* gc_next;
+    union _gc_head* gc_prev;
+    int gc_refs;
+  } gc;
+
+  long double dummy;  /* force worst-case alignment */
+} PyGC_Head;
+```
+
+```c
+[gcmodule.c]
+PyObject* _PyObject_GC_New(PyTypeObject *tp){
+  PyObject* op = _PyObject_GC_Malloc(_PyObject_SIZE(tp));
+  if(op != NULL)
+    op = PyObject_INIT(op,tp);
+  return op;
+}
+
+
+#define _PyGC_REFS_UNTRACKED (-2)
+#define GC_UNTRACKED _PyGC_REFS_UNTRACKED
+
+PyObject* _PyObject_GC_Malloc(size_t basicsize){
+  PyObject* op;
+  // 为对象本身及PyGC_Head申请内存
+  PyGC_Head* g = PyObject_MALLOC(sizeof(PyGC_Head) + basicsize);
+  g->gc.gc_refs = GC_UNTRACKED;
+  generations[0].count++; /* number of allocated GC objects */
+
+  if(generations[0].count > generations[0].threshold &&
+    enabled &&
+    generations[0].threshold &&
+    !collecting &&
+    !PyErr_Occured()){
+      collecting = 1;
+      collect_generations();
+      collecting = 0;
+    }
+
+  op = FROM_GC(g);
+  return op;
+}
+```
+
+![gc_container](/image/gc_container.png)
+
+```c
+//从PyGC_Head地址转换为PyObject_HEAD地址的算法
+[gcmodule.c]
+/* Get an object's GC head */
+#define AS_GC(o) ((PyGC_HEAD *)(o) -1)
+/* Get the object given the GC head */
+#define FROM_GC(g) ((PyObject *)(((PyGC_HEAD *)g) + 1))
+
+[objimpl.h]
+#define _Py_AS_GC(o) ((PyGC_HEAD *)(o) - 1)
+```
+
+```c
+//将container对象链入链表的时间点
+[dictobject.c]
+PyObject* PyDict_New(void){
+  register dictobject *mp;
+  ...
+  mp = PyObject_GC_New(dictobject,&PyDict_Type);
+  ...
+  _PyObject_GC_TRACK(mp);  //链入链表
+  return (PyObject *)mp;
+}
+
+[objimpl.h]
+#define _PyObject_GC_TRACK(o) do{
+  PyGC_Head* g = _Py_AS_GC(o;)
+  if(g->gc.gc_refs != _PyGC_REFS_UNTRACKED)
+    Py_FataError("GC object already tracked");
+  g->gc.gc_refs = _PyGC_REFS_REACHABLE;
+  g->gc.gc_next = _PyGC_generation0;
+  g->gc.gc_prev = _PyGC_generation0->gc.gc_prev;
+  g->gc.gc_prev->gc.gc_next = g;
+  _PyGC_generation0->gc.gc_prev = g;
+}while (0);
+
+[objimpl.h]
+#define _PyObject_GC_UNTRACK(o) do{
+  PyGC_Head* g = _Py_AS_GC(o;)
+  assert(g->gc.gc_refs != _PyGC_REFS_UNTRACKED);
+  g->gc.gc_refs = _PyGC_REFS_UNTRACKED;
+  g->gc.gc_prev->gc.gc_next = g->gc.gc_next;
+  g->gc.gc_next->gc.gc_prev = g->gc.gc_prev;
+  g->gc.gc_next = NULL;
+}while (0);
+```
+
+![gc_list](\image\gc_list.png)
+
+> 分代的垃圾收集
+
+<p>规律:一定比例的内存块的生存周期都比较短，通常是几百万条机器指令的时间，而剩下的内存块，其生存周期会比较长，甚至会从程序开始一直持续到程序结束</p>
+
+<p>核心：空间换时间的分代技术， java的老底</p>
+
+<p>手法：将系统中的所有内存块根据其存活时间划分为不同的集合，每一个集合就称为一个“代”，垃圾收集的频率随着”代“的存活时间的增大而减小,如果一个对象经过的垃圾收集次数越多，其存活时间就越长</p>
+
+<p>python一共有三代，_PyGC_generation0是python内部维护的一个指针，指向的是Python中第0代的内存块集合</p>
+
+```c
+[gcmodule.c]
+struct gc_generation{
+  PyGC_Head head;
+  int threshold; /* collection threshold */
+  int count; /* count of allocations or collections of younger generations */
+};
+
+[gcmodule.c]
+#define NUM_GENERATIONS 3
+#define GEN_HEAD(n) (&generations[n].head)
+
+/* linked lists of container objects */
+static struct gc_generation generations[NUM_GENERATIONS] = {
+  /* PyGC_Head, threshold, count */
+  {{{GEN_HEAD(0),GEN_HEAD(0),0}},700,0},
+  {{{GEN_HEAD(1),GEN_HEAD(1),0}},10, 0},
+  {{{GEN_HEAD(2),GEN_HEAD(2),0}},10, 0},
+};
+
+PyGC_Head *_PyGC_generation0 = GEN_HEAD(0);
+```
+
+![generation_gc](/image/generation_gc.png)
+
+```c
+//第0代内存链表可容纳700个container，一旦超过就会触发垃圾收集机制
+[gcmodule.c]
+static Py_ssize_t collect_generations(void){
+  int i;
+  Py_ssize_t n = 0;
+
+
+  /* 如果count大于threshold，那么回收这一代以及更年轻的一代 */
+  for(i = NUM_GENERATIONS - 1; i >= 0; i--){
+    if(generations[i].count > generations[i].threshold){
+      n = collect(i);
+      break;
+    }
+  }
+
+  return n;
+}
+```
+
+>> Python中的标记-清除方法
+
+```c
+\\将比其“年轻”的所有代的内存链表整个链接到第1代内存链表之后
+[gcmodule.c]
+static void gc_list_init(PyGC_Head* list){
+  list->gc.gc_prev = list;
+  list->gc.gc_next = list;
+}
+
+static void gc_list_merge(PyGC_Head* from, PyGC_Head* to){
+  PyGC_Head* tail;
+  if(!gc_list_is_empty(from)){
+    tail = to->gc.gc_prev;
+    tail->gc.gc_next = from->gc.gc_next;
+    tail->gc.gc_next->gc.gc_prev = tail;
+    to->gc.gc_prev = from->gc.gc_prev;
+    to->gc.gc_prev->gc.gc_next = to;
+  }
+  gc_list_init(from);
+}
+```
+
+![gc_merge_list](\image\gc_merge_list.png)
+
+![example_for_recurRef](\image\example_for_recurRef.png)
+
+>> 寻找Root Object集合
+
+<p>root object是不能被删除的对象，有可收集对象链表外部的某个引用在引用这个对象</p>
+
+```c
+//gc.gc_ref为ob_refcnt值的副本
+[gcmodule.c]
+static void update_refs(PyGC_Head* containers){
+  PyGC_Head* gc = containers->gc.gc_next;
+  for(;gc != containers; gc = gc->gc.gc_next){
+    assert(gc->gc.gc_refs == GC_REACHABLE);
+    gc->gc.gc_refs = FROM_GC(gc)->ob_refcnt;
+  }
+}
+
+//将循环引用从引用中摘除
+[gcmodule.c]
+static void subtract_refs(PyGC_Head* containers){
+  traverseproc traverse;
+  PyGC_Head* gc = containers->gc.gc_next;
+  for(;gc != containers; gc = gc->gc.gc_next){
+    traverse = FROM_GC(gc)->ob_type->tp_traverse;
+    (void)traverse(FROM_GC(gc),(visitproc)visit_decref,NULL);
+  }
+}
+
+```
+
+<p>以PyDictObject对象所定义的traverse操作为例</p>
+
+```c
+[object.h]
+typedef int (*visitproc)(PyObject *, void *);
+typedef int (*traverseproc)(PyObject *, visitproc, void *);
+
+[dictobject.c]
+PyTypeObject PyDict_Type = {
+  ...
+  (traverseproc)dict_traverse,  /* tp_traverse */
+  ...
+};
+
+static int dict_traverse(PyObject* op, visitproc visit, void* arg){
+  int i = 0, err;
+  PyObject* pk;
+  PyObject* pv;
+
+  while (PyDict_Next(op,&i,&pk,&pv)) {
+    visit(pk,arg);
+    visit(pv,arg);
+  }
+}
+
+[gcmodule.c]
+static int visit_decref(PyObject* op, void* data){
+  //PyObject_IS_GC判断op指向的对象是不是被垃圾收集监控的
+  //通常在container对象的type对象中有Py_TPFLAGS_HAVE_GC符号
+  //标识container对象是被垃圾收集监控的
+  if(PyObject_IS_GC(op)){
+    PyGC_Head* gc = AS_GC(op);
+    if(gc->gc.gc_refs > 0)
+      gc->gc.gc_refs--;
+  }
+  return 0;
+}
+```
+
+<p>subtract_refs之后，不为0的就是root object</p>
+
+![after_update](\image\after_update.png)
+
+>> 垃圾标记
+
+<p>root object不可回收，分成两条链root链和unreachable链</p>
+
+```c
+[gcmodule.c]
+static void move_unreachable(PyGC_Head* young, PyGC_Head* unreachable){
+  PyGC_Head* gc = young->gc.gc_next;
+  while(gc != young){
+    PyGC_Head* next;
+
+    //对于root object, 设置其gc_refs为GC_REACHABLE标志
+    if(gc->gc_refs){
+      PyObject* op = FROM_GC(gc);
+      traverseproc traverse = op->ob_type->tp_traverse;
+      gc->gc.gc_refs = GC_REACHABLE;
+      (void)traverse(op,(visitproc)visit_reachable,(void *)young);
+      next = gc->gc.gc_next;
+    }
+
+    //对于非root对象，移到unreachable链表中
+    //并标记为GC_TENTATIVELY_UNREACHABLE
+    else{
+      next = gc->gc.gc_next;
+      gc_list_move(gc,unreachable);
+      gc->gc.gc_refs = GC_TENTATIVELY_UNREACHABLE;
+    }
+    gc = next;
+  }
+}
+
+static int visit_reachable(PyObject* op, PyGC_Head* reachable){
+  if(PyObject_IS_GC(op)){
+    PyGC_Head* gc = AS_GC(op);
+    const int gc_refs = gc->gc.refs;
+    //对于还没处理的对象，恢复其gc_refs
+    if(gc_refs == 0){
+      gc->gc.gc_refs = 1;
+    }
+    //对于已经被挪到unreachable链表中的对象，将其再次挪到原来的链表
+    else if(gc_refs == GC_TENTATIVELY_UNREACHABLE){
+      gc_list_move(gc,reachable);
+      gc->gc.gc_refs = 1;
+    }
+    else{
+      assert(gc_refs > 0 || gc_refs == GC_REACHABLE || gc_refs == GC_UNTRACKED);
+    }
+  }
+  return 0;
+}
+```
+
+<p>特殊的container对象,即从类对象实例化得到的实例对象，有一个特殊方法"__del__"，被称为finalizer，假如对象B在finalizer中调用对象A的某个操作，Python必须先回收B，再回收A，但python无法保证回收顺序，采取的方法是：！！！将unreachable链表中的拥有finalizer的PyInstanceObject对象统统都移到一个名为garbage的PyListObject对象</p>
+
+>> 垃圾回收
+
+<p>将unreachable链表中的每一个对象的ob_refcnt变为0,引发对象的销毁</p>
+
+```c
+[gcmodule.c]
+static int gc_list_is_empty(PyGC_Head* list){
+  return (list->gc.gc_next == list);
+}
+
+static void delete_garbage(PyGC_Head* collectable, PyGC_Head* old){
+  inquiry clear;
+
+  while(!gc_list_is_empty(collectable)){
+    PyGC_Head* gc = collectable->gc.gc_next;
+    PyObject* op = FROM_GC(gc);
+
+    if((clear = op->ob_type->tp_clear) != NULL){
+      Py_INCREF(op);
+      clear(op);
+      Py_DECREF(op);
+    }
+
+    if(collectable->gc.gc_next == gc){
+      /* object is still alive, move it, it may die later */
+      gc_list_move(gc,old);
+      gc->gc.gc_refs = GC_REACHABLE;
+    }
+  }
+}
+```
