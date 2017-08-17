@@ -361,6 +361,8 @@ static poolp usedpools[2 * (NB_SMALL_SIZE_CLASSES + 7)/8 * 8] = {
 #define NB_SMALL_SIZE_CLASSES (SMALL_REQUEST_THRESHOLD / ALIGNMENT)
 ```
 
+![usedpools](/image/usedpools.png)
+
 ```c
 [obmalloc.c]
 void* PyObject_Malloc(size_t nbytes){
@@ -372,7 +374,312 @@ void* PyObject_Malloc(size_t nbytes){
   if((nbytes - 1) < SMALL_REQUEST_THRESHOLD){
     LOCK();
     //获得size class index
+    size = (uint )(nbytes - 1) >> ALIGNMENT_SHIFT
+    pool = usedpools[size + size];
+    //usedpools中有可用的pool
+    if(pool != pool->nextpool){
+      ....//usedpools中有可用的pool
+    }
 
+    ...//usedpools中无可用pool，尝试获取empty状态pool
+
+  }
+}
+```
+
+>> pool 的初始化
+
+<p>!!!!!!arena没有size class的属性，而pool才有</p>
+
+```c
+[obmalloc.c]
+void* PyObject_Malloc(size_t nbytes){
+  block* bp;
+  poolp pool;
+  poolp next;
+  uint size;
+
+  if((nbytes - 1) < SMALL_REQUEST_THRESHOLD){
+    LOCK();
+    size = (uint)(nbytes - 1) >> ALIGNMENT_SHIFT;
+    pool = usedpools[size + size];
+    if(pool != pool->nextpool){
+      ...//usedpools中有可用的pool
+    }
+
+    //usedpools中无可用pool，尝试获取empty状态pool
+    //如果usable_arenas链表为空，则创建链表
+    if(usable_arenas == NULL){
+      //申请新的arena_object，并放入usable_arenas链表
+      usable_arenas = new_arena();
+      usable_arenas->nextarena = usable_arenas->prevarena = NULL;
+    }
+
+    //从usable_arenas链表中第一个arena的freepools中抽取一个可用的pool
+    pool = usable_arenas->freepools;
+    if(pool != NULL){
+      usable_arenas->freepools = pool->nextpool;
+      //调整usable_arenas链表中第一个arena中的可用pool数量
+      //如果调整后数量为0,则将该arena从usable_arenas链表中摘除
+      --usable_arenas->nfreepools;
+      if(usable_arenas->nfreepools == 0){
+        usable_arenas = usable_arenas->nextarena;
+        if(usable_arenas != NULL){
+          usable_arenas->prevarena = NULL;
+        }
+      }
+      init pool:
+        ...
+    }
+
+  }
+}
+```
+
+>>> 初始化之一
+
+```c
+[obmalloc.c]
+#define ROUNDUP(x)  (((x) + ALIGNMENT_MASK) & ~ALIGNMENT_MASK)
+#define POOL_OVERHEAD  ROUNDUP(sizeof(struct pool_header));
+void *PyObject_Malloc(size_t nbytes){
+  ...
+  init_pool:
+    //将pool放入usedpools中
+    next = usedpools[size + size];  /* == prev */
+    pool->nextpool = next;
+    pool->prevpool = next;
+    next->nextpool = pool;
+    next->prevpool = pool;
+    pool->ref.count = 1;
+    // pool在之前就具有正确的size结构,直接返回pool中的一个block
+
+    //只有当一个pool从empty状态重新转为used状态之后，由于这时szidx还是其转为empty状态之前的szidx，所有才有可能执行
+    if(pool->szidx == size){
+      bp = pool->freeblock;
+      pool->freeblock = *(block **)bp;
+      UNLOCK();
+      return (void *)bp;
+    }
+
+    //初始化pool header，将freeblock指向第二个block，返回第一个block
+    pool->szidx = size;
+    size = INDEX2SIZE(size);
+    bp = (block *)pool + POOL_OVERHEAD;
+    pool->nextoffset = POOL_OVERHEAD + (size << 1);
+    pool->maxnextoffset = POOL_SIZE - size;
+    pool->freeblock = bp + size;
+    *(block **)(pool->freeblock) = NULL;
+    UNLOCK();
+    return (void *)bp;
+    ...
+}
+```
+
+<p>empty状态转换到used状态</p>
+
+```c
+[obmalloc.c]
+...
+pool = usable_arenas->freepools;
+if(pool != NULL){
+  usable_arenas->freepools = pool->nextpool;
+  ...//调整usable_arenas->nfreepools和usable_arenas自身
+  [init_pool]
+}
+```
+
+>>> 初始化之二
+
+```c
+[obmalloc.c]
+#define DUMMY_SIZE_IDX 0xffff /* size class of newly cached pools */
+void* PyObject_Malloc(size_t nbytes){
+  block* bp;
+  poolp pool;
+  poolp next;
+  uint size;
+  ...
+
+  //从arena中取出一个新的pool
+  pool = (poolp)usable_arenas->pool_address;
+  pool->arenaindex = usable_arenas - arenas;
+  pool->szidx = DUMMY_SIZE_IDX;
+  usable_arenas->pool_address += POOL_SIZE;
+  --usable_arenas->nfreepools;
+
+  if(usable_arenas->nfreepools == 0){
+    /* Unlink the arena : it is completely allocated */
+    usable_arenas = usable_arenas->nextarena;
+    if(usable_arenas != NULL){
+      usable_arenas->prevarena = NULL;
+    }
+  }
+
+  goto init_pool:
+  ...
+
+//判断一个block是否在某一个pool中
+[obmalloc.c]
+//P为指向一个block的指针，pool为指向一个pool的指针
+int Py_ADDRESS_IN_RANGE(void* P, poolp pool){
+  return pool->arenaindex < maxarenas &&
+          (uptr)P - arenas[pool->arenaindex].address < (uptr)ARENA_SIZE && arenas[pool->arenaindex].address != 0;
+}
+
+```
+
+```c
+//PyObject_Malloc的总体结构
+[obmalloc.c]
+void* PyObject_Malloc(size_t nbytes){
+  block* bp;
+  poolp pool;
+  poolp next;
+  uint size;
+
+
+  //如果申请的内存小于SMALL_REQUEST_THRESHOLD,使用Python的小块内存的内存池
+  //否则转向malloc
+  if((nbytes - 1) < SMALL_REQUEST_THRESHOLD){
+    //根据申请内存的大小获得对应的size class index
+    size = (uint)(nbytes - 1) >> ALIGNMENT_SHIFT;
+    pool = usedpools[size + size];
+    //如果usedpools中可用的pool，使用这个pool来分配block
+    if(pool != pool->next){
+      ...//在pool中分配block
+      //分配结束后，如果pool中的block被分配了，将pool从usedpools中摘除(其实就是在双链表中去掉节点)
+      next = pool->nextpool;
+      pool = pool->prevpool;
+      next->prevpool = pool;
+      pool->nextpool = next;
+      return (void *)bp;
+    }
+
+    //usedpools中没有可用的pool，从usable_arenas中获取pool
+    if(usable_arenas == NULL){
+      //usable_arenas中没有“可用”的arena，开始申请arena
+      usable_arenas = new_arena();
+      usable_arenas->nextarena = usable_arenas->prevarena = NULL;
+    }
+
+    //从usable_arenas中的第一个arena中获取一个pool
+    pool = usable_arenas->freepools;
+    if(pool != NULL){
+      init_pool:
+      //获取pool成功，进行init pool的动作，将pool放入used_pools中，
+      //并返回分配得到的block
+      ......
+    }
+
+    //获取pool失败，对arena中的pool集合进行初始化
+    //然后转入goto到init pool的动作处，初始化一个特定的pool
+
+    ...
+      goto init_pool;
+
+  }
+
+redirect:
+  //如果申请的内存不小于SMALL_REQUEST_THRESHOLD,使用malloc
+  if(nbytes == 0)
+    nbytes = 1;
+
+  return (void *)malloc(nbytes);
+
+}
+```
+
+>>> block的释放
+
+<p>释放一个block后，pool的状态有两种转变情况: 1.used状态转变为empty状态  2.full状态转变为used状态 3.used仍然处于used状态 </p>
+
+```c
+//used->used
+[obmalloc.c]
+void PyObject_Free(void *p){
+  poolp pool;
+  block* lastfree;
+  poolp next, prev;
+  uint size;
+
+  pool = POOL_ADDR(p);
+  if(Py_ADDRESS_IN_RANGE(p,pool)){
+    //设置离散自由block链表
+    *(block **)p = lastfree = pool->freeblock;
+    pool->freeblock = (block *)p;
+    if(lastfree){ //lastfree有效，表明当前pool不是处于full状态
+      if(--pool->ref.count != 0){ // pool不需要转换为empty状态
+        return;
+      }
+      ...
+    }
+    ...
+  }
+
+  //待释放的内存在PyObject_Malloc中是通过malloc获得的
+  //所以要归还给系统
+  free(p);
+}
+```
+
+```c
+//full->used
+[obmalloc.c]
+void PyObject_Free(void *p){
+  poolp pool;
+  block *lastfree;
+  poolp next,prev;
+  uint size;
+
+  pool = POOL_ADDR(p);
+  if(Py_ADDRESS_IN_RANGE(p,pool)){
+    ......
+    //当前pool处于full状态,在释放一块block后，需将其转换为used状态，并重新链入usedpools的头部
+    //链入usedpool头部
+    --pool->ref.count;
+    size = pool->szidx;
+    next = usedpools[size + size];
+    prev = next->prevpool;
+    pool->nextpool = next;
+    pool->prevpool = prev;
+    next->prevpool = pool;
+    prev->nextpool = pool;
+    return;
+  }
+  ...
+}
+```
+
+```c
+//used->empty
+[obmalloc.c]
+void PyObject_Free(void *p){
+  poolp pool;
+  block* lastfree;
+  poolp next, prev;
+  uint size;
+
+  pool = POOL_ADDR(p);
+  if(Py_ADDRESS_IN_RANGE(p,pool)){
+    //设置离散自由block链表
+    *(block **)p = lastfree = pool->freeblock;
+    pool->freeblock = (block *)p;
+    if(lastfree){
+      struct arena_object* ao;
+      uint nf; //ao->nfreepools
+      if(--pool->ref.count != 0){
+        return;
+      }
+
+      //将pool放入freepools维护的链表中
+      ao = &arenas[pool->arenaindex];
+      pool->nextpool = ao->freepools;
+      ao->freepools = pool;
+      nf = ++ao->nfreepools;
+      ...
+    }
+    ...
   }
 }
 ```
