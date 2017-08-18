@@ -1082,7 +1082,7 @@ static int gc_list_is_empty(PyGC_Head* list){
   return (list->gc.gc_next == list);
 }
 
-static void delete_garbage(PyGC_Head* collectable, PyGC_Head* old){
+static void delete_garbage(PyGC_Head* collectable, PyGC_Head* old){ //old为reachable链表
   inquiry clear;
 
   while(!gc_list_is_empty(collectable)){
@@ -1102,4 +1102,193 @@ static void delete_garbage(PyGC_Head* collectable, PyGC_Head* old){
     }
   }
 }
+```
+
+```c
+//会调用container对象的类型对象中的tp_clear操作，操作会调整container对象中每个引用所用的对象的引用计数值，从而完成打破循环的最终目标
+//以list为例子
+[listobject.c]
+static int list_clear(PyListObject* a){
+  int i;
+  PyObject** item = a->ob_item;
+  if(item != NULL){
+    i = a->ob_size;
+    a->ob_size = 0;
+    a->ob_item = NULL;
+    a->allocated = 0;
+    while(--i >= 0){
+      Py_XDECREF(item[i]);
+    }
+    PyMem_FREE(item);
+  }
+  return 0;
+}
+
+[listobject.c]
+static void list_dealloc(PyListObject* op){
+  int i;
+  PyObject_GC_UnTrack(op);
+  if(op->ob_item != NULL){
+    i = op->ob_size;
+    while(--i >= 0){
+      Py_XDECREF(op->ob_item[i]);
+    }
+    PyMem_FREE(op->ob_item);
+  }
+  ...
+}
+```
+
+>> 垃圾收集全景
+
+```c
+[gcmodule.c]
+static long collect(int generation){
+  int i;
+  long m = 0; /* # objects collected */
+  long n = 0; /* # unreachable objects that couldn't be collected */
+  PyGC_Head* young; /* the generation we are examining */
+  PyGC_Head* old; /* next older generation */
+  PyGC_Head unreachable; /* non-problematic unreachable trash */
+  PyGC_Head finalizers; /* objects with, &reachable from, __del__ */
+  PyGC_Head* gc;
+
+  if(delstr == NULL){
+    delstr = PyString_InternFromString("__del__");
+    if(delstr == NULL)
+      Py_FataError("gc couldn't allocate \"__del__\"");
+  }
+
+  /* update collection and allocation counters */
+  if(generation + 1 < NUM_GENERATIONS)
+    generations[generation + 1].count += 1;
+
+  for(i = 0;i < generation; i++)
+    generations[i].count = 0;
+
+  /* merge younger generations with one we are currently collecting */
+  for(i = 0; i < generation; i++){
+    gc_list_merge(GEN_HEAD(i),GEN_HEAD(generation));
+  }
+
+  /* handy  references */
+  young = GEN_HEAD(generation);
+  if(generation < NUM_GENERATIONS - 1)
+    old = GEN_HEAD(generation + 1);
+  else
+    old = young;
+
+  //在待处理链表上进行打破循环的模拟，寻找root object
+  update_refs(young);
+  subtract_refs(young);
+
+  //将待处理链表中的unreachable object转移到unreachable链表中
+  //处理完成后，当前“代”中只剩下了reachable object了
+  gc_list_init(&unreachable);
+  move_unreachable(young, &unreachable);
+
+  //如果可能将当前"代"中的reachable object合并到更老的”代”中
+  if(young != old)
+    gc_list_merge(young,old);
+
+  //对于unreachable链表中的对象，如果其带有__del__函数，则不能安全回收
+  //需要将这些对象收集到finalizers链表中，因此，这些对象引用的对象也不能
+  //回收，也需要放入finalizers链表中
+  gc_list_init(&finalizers);
+  move_finalizer(&unreachable,&finalizers);
+  move_finalizer_reachable(&finalizers);
+
+  //处理若引用(weakref)，如果可能，调用弱引用中注册的callback操作
+  handle_weakrefs(&unreachable,old);
+
+  //对unreachable链表上的对象进行垃圾回收操作
+  delete_garbage(&unreachable,old);
+
+  //将含有__del__操作的实例对象收集到python内部维护的名为garbage的链表中
+  //同时将finalizers链表中所有对象加入到old链表中
+  (void)handle_finalizers(&finalizers,old);
+  ...
+}
+```
+
+```c
+//PyFunctionObject对象的正常销毁
+[funcobject.c]
+static void fun_dealloc(PyFunctionObject* op){
+  _PyObject_GC_UNTRACK(op);
+  ...
+  PyObject_GC_Del(op);
+}
+
+[gcmodule.c]
+void PyObject_GC_Del(void* op){
+  PyGC_Head* g = AS_GC(g);
+  if(IS_TRACKED(op))
+    gc_list_merge(g);
+  if(generation[0].count > 0){
+    generations[0].count--;
+  }
+  PyObject_FREE(g); //最终调用PyObject_FREE
+}
+```
+
+<p>总之，python的垃圾收集机制单纯是为了服务循环引用</p>
+
+>> Python中的gc模块
+
+```python
+[gc1.py]
+import gc
+class A(object):
+  pass
+
+class B(object):
+  pass
+
+gc.set_debug(gc.DEBUG_STATS | gc.DEBUG_LEAK)
+a = A()
+b = B()
+del a
+del b
+gc.collect()
+```
+
+```python
+[gc2.py]
+import gc
+class A(object):
+  pass
+
+class B(object):
+  pass
+
+gc.set_debug(gc.DEBUG_STATS | gc.DEBUG_LEAK)
+a = A()
+b = B()
+a.b = b
+b.a = a
+del a
+del b
+gc.collect()
+```
+
+```python
+[gc3.py]
+import gc
+class A(object):
+  def __del__(self):
+    pass
+
+class B(object):
+  def __del__(self):
+    pass
+
+gc.set_debug(gc.DEBUG_STATS | gc.DEBUG_LEAK)
+a = A()
+b = B()
+a.b = b
+b.a = a
+del a
+del b
+gc.collect()
 ```
